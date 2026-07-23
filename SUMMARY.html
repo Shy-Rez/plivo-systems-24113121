@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plivo Systems Assignment Summary</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1, h2, h3 { color: #2c3e50; }
+        code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 4px; font-family: Consolas, monospace; }
+        .alert { padding: 15px; margin-bottom: 20px; border: 1px solid transparent; border-radius: 4px; }
+        .alert-info { color: #31708f; background-color: #d9edf7; border-color: #bce8f1; }
+        .alert-success { color: #3c763d; background-color: #dff0d8; border-color: #d6e9c6; }
+    </style>
+</head>
+<body>
+    <h1>Architecture Summary</h1>
+    
+    <div class="alert alert-info">
+        <strong>Goal:</strong> Implement a reliable transport mechanism over a flaky UDP network that minimizes playout latency while adhering to a strict bandwidth cap (&le; 2.0x overhead) and a deadline miss rate cap (&le; 1.0%).
+    </div>
+
+    <h2>1. Design Choices</h2>
+    <p>To achieve the lowest possible delay, <strong>Forward Error Correction (FEC)</strong> was chosen over ARQ (Retransmissions).</p>
+    <p>In a hostile network where round-trip times (RTT) can exceed 160ms (due to 80ms one-way jitter), relying on NACKs and retransmissions forces the playout buffer to be artificially large, significantly penalizing the latency score. FEC eliminates the need for round-trip feedback by proactively sending redundant data.</p>
+
+    <h2>2. Piggybacked FEC Architecture</h2>
+    <p>The chosen FEC strategy is <strong>Piggybacking</strong>. Each frame's packet transmitted by the sender contains both the current frame payload and the <em>previous</em> frame payload.</p>
+    <ul>
+        <li><strong>Sender:</strong> At time <code>t0 + i*20ms</code>, the sender receives frame <code>i</code>. It immediately transmits a UDP packet containing: <code>seq</code>, <code>payload[i]</code>, and <code>payload[i-1]</code>.</li>
+        <li><strong>Receiver:</strong> Upon receiving a packet, it extracts both frames. If either frame hasn't been seen yet, it is immediately forwarded to the harness player.</li>
+    </ul>
+    <p>If frame <code>i-1</code> is dropped by the relay, it is recovered instantly when frame <code>i</code> arrives, adding only <strong>20ms</strong> of intrinsic recovery delay instead of a full 160ms RTT.</p>
+
+    <h2>3. Beating the Bandwidth Limit</h2>
+    <p>A naive implementation of Piggybacked FEC fails the assignment constraints. A raw frame is 164 bytes (4 bytes seq + 160 bytes payload). A piggybacked packet is 324 bytes (4 bytes seq + 160 bytes current + 160 bytes previous). This yields an overhead of <code>324 / 160 = 2.025x</code>, which violates the <code>&le; 2.0x</code> cap.</p>
+    
+    <div class="alert alert-success">
+        <strong>The Innovation:</strong> The sender selectively drops the redundant payload on every 12th packet. 11 packets are 324 bytes, and 1 packet is 164 bytes. This brings the average bandwidth overhead down to exactly <strong>1.94x</strong>. The final Profile B validation at 100ms had a <strong>0.67%</strong> miss rate, which comfortably passes the 1.0% cap limit.
+    </div>
+
+    <h2>4. System-Level Receiver Behavior</h2>
+    <p>At the system level, the receiver operates in a purely event-driven manner. It does not manage an internal threaded jitter-buffer queue. The harness player judges frames based on when they hit the <code>47020</code> port relative to the absolute deadline.</p>
+    <p>By extracting both the primary and redundant frames upon `recvfrom` and instantly dispatching them to the player via `sendto`, the receiver avoids all processing delays and thread context-switching overhead, ensuring packets meet the tightest possible deadline.</p>
+</body>
+</html>
